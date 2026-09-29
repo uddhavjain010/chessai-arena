@@ -9,7 +9,7 @@ interface EvaluationBarProps {
   isThinking?: boolean;
 }
 
-export const EvaluationBar: React.FC<EvaluationBarProps> = ({
+export const EvaluationBar: React.FC<EvaluationBarProps> = React.memo(({
   evaluation,
   orientation,
   visible,
@@ -27,11 +27,10 @@ export const EvaluationBar: React.FC<EvaluationBarProps> = ({
 
   return (
     <div
-      className="flex flex-col items-center select-none"
+      className="flex flex-col items-center select-none flex-shrink-0"
       title="Position Evaluation (Stockfish heuristic). A higher score indicates a positional or material advantage, not a guaranteed outcome."
     >
-      <div className="relative w-7 md:w-8 h-[min(86vw,min(70vh,560px))] rounded-lg overflow-hidden bg-slate-950 border border-slate-700/80 shadow-lg flex flex-col justify-end">
-        {/* Black side background is bg-slate-950 */}
+      <div className="relative w-6 sm:w-7 h-[min(74vh,580px)] max-h-full rounded-lg overflow-hidden bg-slate-950 border border-slate-700/80 shadow-lg flex flex-col justify-end">
         {/* White side fill */}
         <div
           className="w-full bg-slate-100 transition-all duration-300 ease-out"
@@ -43,7 +42,7 @@ export const EvaluationBar: React.FC<EvaluationBarProps> = ({
 
         {/* Evaluation score indicator tag */}
         <div
-          className={`absolute left-0 right-0 px-1 py-0.5 text-[11px] font-mono font-bold text-center pointer-events-none transition-all duration-300 ${
+          className={`absolute left-0 right-0 px-0.5 py-0.5 text-[10px] font-mono font-bold text-center pointer-events-none transition-all duration-200 ${
             isWhiteAdvantage
               ? (orientation === 'w' ? 'bottom-2 text-slate-900' : 'top-2 text-slate-100')
               : (orientation === 'w' ? 'top-2 text-slate-100' : 'bottom-2 text-slate-900')
@@ -54,12 +53,14 @@ export const EvaluationBar: React.FC<EvaluationBarProps> = ({
 
         {/* Thinking pulse indicator */}
         {isThinking && (
-          <div className="absolute inset-0 bg-cyan-400/15 animate-pulse pointer-events-none" />
+          <div className="absolute inset-0 bg-cyan-400/20 animate-pulse pointer-events-none" />
         )}
       </div>
-      <span className="text-[10px] font-semibold text-slate-400 mt-1 uppercase tracking-wider">
+      <span className="text-[9px] font-semibold text-slate-500 mt-1 uppercase tracking-wider">
         Eval
       </span>
     </div>
   );
-};
+});
+
+EvaluationBar.displayName = 'EvaluationBar';

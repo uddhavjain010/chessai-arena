@@ -13,6 +13,7 @@ class ChessEngineService {
   private worker: Worker | null = null;
   private workerFailed: boolean = false;
   private currentRequestId: number = 0;
+  private activeSearchId: number = 0;
   private pendingCallbacks: Map<number, (data: any) => void> = new Map();
   private statusListeners: Array<(isThinking: boolean) => void> = [];
 
@@ -33,7 +34,6 @@ class ChessEngineService {
         const callback = this.pendingCallbacks.get(id);
         if (callback) {
           this.pendingCallbacks.delete(id);
-          this.notifyStatus(false);
           if (error) {
             console.warn('[Engine Worker Error]', error);
           }
@@ -42,7 +42,7 @@ class ChessEngineService {
       };
 
       this.worker.onerror = (err) => {
-        console.warn('[Engine Worker] Web Worker error, falling back to synchronous execution:', err);
+        console.warn('[Engine Worker] Web Worker error, falling back to non-blocking timeout engine:', err);
         this.workerFailed = true;
         this.notifyStatus(false);
       };
@@ -64,25 +64,56 @@ class ChessEngineService {
   }
 
   /**
-   * Request best move from engine
+   * Cancel or invalidate any in-flight AI calculations (e.g. on new game, restart, undo)
+   */
+  public cancelActiveSearch() {
+    this.activeSearchId = ++this.currentRequestId;
+    this.pendingCallbacks.clear();
+    this.notifyStatus(false);
+  }
+
+  /**
+   * Request best move from engine without blocking the React UI thread
    */
   public async getBestMove(fen: string, difficulty: AIDifficulty): Promise<BestMoveResult | null> {
-    this.notifyStatus(true);
     const requestId = ++this.currentRequestId;
+    this.activeSearchId = requestId;
+    this.notifyStatus(true);
 
-    // Artificial thinking delay to feel natural like a human/engine opponent
-    const thinkingDelayMs: Record<AIDifficulty, number> = {
-      beginner: 350,
-      easy: 500,
-      medium: 700,
-      hard: 1000,
-      expert: 1300
+    const startTime = performance.now();
+
+    // Target minimum pacing so AI feels natural without lagging
+    const targetDelayMs: Record<AIDifficulty, number> = {
+      beginner: 250,
+      easy: 380,
+      medium: 800,
+      hard: 1700,
+      expert: 2500
     };
-    const delay = thinkingDelayMs[difficulty];
+    const targetDelay = targetDelayMs[difficulty];
 
     return new Promise((resolve) => {
+      let resolved = false;
+
       const finish = (result: any) => {
+        if (resolved) return;
+        // Verify this request is still the active search (not cancelled or superseded)
+        if (this.activeSearchId !== requestId) {
+          resolve(null);
+          return;
+        }
+
+        resolved = true;
+        this.pendingCallbacks.delete(requestId);
+
+        const elapsed = performance.now() - startTime;
+        const remainingDelay = Math.max(0, targetDelay - elapsed);
+
         setTimeout(() => {
+          if (this.activeSearchId !== requestId) {
+            resolve(null);
+            return;
+          }
           this.notifyStatus(false);
           if (!result || !result.bestMove) {
             resolve(null);
@@ -95,11 +126,37 @@ class ChessEngineService {
               evaluation: result.evaluation
             });
           }
-        }, Math.max(100, delay));
+        }, remainingDelay);
+      };
+
+      // Failsafe timer (4.5s max): if calculation hangs, return immediate fallback move
+      const safetyTimeout = setTimeout(() => {
+        if (!resolved && this.activeSearchId === requestId) {
+          console.warn('[Engine] Failsafe timeout reached, using fallback move');
+          try {
+            const fallback = getBestMove(fen, difficulty);
+            finish({
+              bestMove: fallback.bestMove ? {
+                from: fallback.bestMove.from,
+                to: fallback.bestMove.to,
+                san: fallback.bestMove.san,
+                promotion: fallback.bestMove.promotion
+              } : null,
+              evaluation: fallback.evaluation
+            });
+          } catch {
+            finish(null);
+          }
+        }
+      }, 4500);
+
+      const wrappedFinish = (result: any) => {
+        clearTimeout(safetyTimeout);
+        finish(result);
       };
 
       if (this.worker && !this.workerFailed) {
-        this.pendingCallbacks.set(requestId, finish);
+        this.pendingCallbacks.set(requestId, wrappedFinish);
         this.worker.postMessage({
           type: 'SEARCH',
           id: requestId,
@@ -107,11 +164,12 @@ class ChessEngineService {
           difficulty
         });
       } else {
-        // Fallback execution off next tick
+        // Fallback execution off main loop
         setTimeout(() => {
+          if (this.activeSearchId !== requestId) return;
           try {
             const res = getBestMove(fen, difficulty);
-            finish({
+            wrappedFinish({
               bestMove: res.bestMove ? {
                 from: res.bestMove.from,
                 to: res.bestMove.to,
@@ -121,10 +179,10 @@ class ChessEngineService {
               evaluation: res.evaluation
             });
           } catch (e) {
-            console.error('Fallback engine failed', e);
-            finish(null);
+            console.error('Fallback engine calculation error', e);
+            wrappedFinish(null);
           }
-        }, delay);
+        }, 10);
       }
     });
   }
@@ -133,8 +191,8 @@ class ChessEngineService {
    * Request tactical/positional hint
    */
   public async getHint(fen: string): Promise<HintResult | null> {
-    this.notifyStatus(true);
     const requestId = ++this.currentRequestId;
+    this.notifyStatus(true);
 
     return new Promise((resolve) => {
       const finish = (result: any) => {
@@ -153,7 +211,7 @@ class ChessEngineService {
         setTimeout(() => {
           const hint = getHint(fen);
           finish({ hint });
-        }, 300);
+        }, 10);
       }
     });
   }
@@ -162,8 +220,8 @@ class ChessEngineService {
    * Run full game move analysis
    */
   public async analyzeGame(pgn: string): Promise<MoveAnalysis[]> {
-    this.notifyStatus(true);
     const requestId = ++this.currentRequestId;
+    this.notifyStatus(true);
 
     return new Promise((resolve) => {
       const finish = (result: any) => {
@@ -182,19 +240,19 @@ class ChessEngineService {
         setTimeout(() => {
           const analyses = analyzeGame(pgn);
           finish({ analyses });
-        }, 100);
+        }, 10);
       }
     });
   }
 
   public terminate() {
+    this.cancelActiveSearch();
     if (this.worker) {
       this.worker.terminate();
       this.worker = null;
     }
-    this.pendingCallbacks.clear();
-    this.notifyStatus(false);
   }
 }
 
+// Singleton instance initialized once
 export const chessEngine = new ChessEngineService();

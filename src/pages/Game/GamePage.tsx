@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { Chess, Square, Color, PieceSymbol } from 'chess.js';
 import { ChessBoard } from '../../components/ChessBoard/ChessBoard';
 import { EvaluationBar } from '../../components/EvaluationBar/EvaluationBar';
@@ -198,12 +198,15 @@ export const GamePage: React.FC<GamePageProps> = ({
 
   // Execute AI move when it is AI turn
   useEffect(() => {
-    if (mode !== 'ai' || isGameOver || isAiThinking) return;
+    if (mode !== 'ai' || isGameOver) return;
 
     const currentTurn = chess.turn();
     const isAiTurn = currentTurn !== playerColor;
 
-    if (!isAiTurn) return;
+    if (!isAiTurn) {
+      setIsAiThinking(false);
+      return;
+    }
 
     let isMounted = true;
     setIsAiThinking(true);
@@ -242,25 +245,30 @@ export const GamePage: React.FC<GamePageProps> = ({
           setLastMove({ from: move.from, to: move.to });
           setHintMove(null);
           setHintMessage(null);
-          setEvaluation(evaluateBoard(chess));
           updateCapturedPieces();
-
           checkGameRulesTermination();
+
+          // Update evaluation score on next frame
+          setTimeout(() => {
+            setEvaluation(evaluateBoard(chess));
+          }, 0);
         }
       } catch (err) {
         console.error('Failed to make AI move:', err);
       } finally {
-        setIsAiThinking(false);
+        if (isMounted) {
+          setIsAiThinking(false);
+        }
       }
     });
 
     return () => {
       isMounted = false;
     };
-  }, [mode, isGameOver, chess, playerColor, aiDifficulty, settings.soundEnabled, timeControl.incrementSeconds, updateCapturedPieces, checkGameRulesTermination, isAiThinking]);
+  }, [mode, isGameOver, chess, playerColor, aiDifficulty, settings.soundEnabled, timeControl.incrementSeconds, updateCapturedPieces, checkGameRulesTermination]);
 
-  // Make human move
-  const handleMakeMove = (from: Square, to: Square, promotion: PieceSymbol = 'q'): boolean => {
+  // Make human move - runs immediately with zero lag
+  const handleMakeMove = useCallback((from: Square, to: Square, promotion: PieceSymbol = 'q'): boolean => {
     if (isGameOver || isAiThinking) return false;
 
     // In AI mode, prevent moving on AI's turn
@@ -290,21 +298,27 @@ export const GamePage: React.FC<GamePageProps> = ({
         else soundManager.playMove();
       }
 
+      // 1. UPDATE BOARD IMMEDIATELY
       setBoardVersion(v => v + 1);
       setHistory(chess.history());
       setCurrentReviewIndex(chess.history().length - 1);
       setLastMove({ from, to });
       setHintMove(null);
       setHintMessage(null);
-      setEvaluation(evaluateBoard(chess));
       updateCapturedPieces();
 
-      checkGameRulesTermination();
+      const terminated = checkGameRulesTermination();
+      if (!terminated) {
+        // Calculate evaluation on next tick so user piece move renders with 0ms delay
+        setTimeout(() => {
+          setEvaluation(evaluateBoard(chess));
+        }, 10);
+      }
       return true;
     } catch {
       return false;
     }
-  };
+  }, [isGameOver, isAiThinking, mode, chess, playerColor, isClockRunning, timeControl, settings.soundEnabled, updateCapturedPieces, checkGameRulesTermination]);
 
   // Start new game setup
   const handleStartConfiguredGame = (config: {
@@ -313,6 +327,8 @@ export const GamePage: React.FC<GamePageProps> = ({
     difficulty: AIDifficulty;
     timeControl: TimeControl;
   }) => {
+    chessEngine.cancelActiveSearch();
+    setIsAiThinking(false);
     chess.reset();
     const resolvedColor: Color = config.playerColor === 'random'
       ? (Math.random() < 0.5 ? 'w' : 'b')
@@ -344,6 +360,8 @@ export const GamePage: React.FC<GamePageProps> = ({
 
   // Restart identical match
   const handleRestart = () => {
+    chessEngine.cancelActiveSearch();
+    setIsAiThinking(false);
     chess.reset();
     setWhiteTime(timeControl.initialMinutes * 60);
     setBlackTime(timeControl.initialMinutes * 60);
@@ -365,6 +383,8 @@ export const GamePage: React.FC<GamePageProps> = ({
   // Undo move
   const handleUndo = () => {
     if (isGameOver || isAiThinking || history.length === 0) return;
+    chessEngine.cancelActiveSearch();
+    setIsAiThinking(false);
 
     if (mode === 'ai') {
       // Undo twice so human player can make a different move
@@ -444,17 +464,18 @@ export const GamePage: React.FC<GamePageProps> = ({
     }
   };
 
-  // Review chess object passed to ChessBoard
-  const boardDisplayChess = currentReviewIndex === history.length - 1
-    ? chess
-    : (() => {
-        const c = new Chess();
-        const moves = chess.history({ verbose: true });
-        for (let i = 0; i <= currentReviewIndex && i < moves.length; i++) {
-          c.move(moves[i]);
-        }
-        return c;
-      })();
+  // Review chess object passed to ChessBoard - memoized to prevent creating new instances every render
+  const boardDisplayChess = useMemo(() => {
+    if (currentReviewIndex === history.length - 1 || (currentReviewIndex === -1 && history.length === 0)) {
+      return chess;
+    }
+    const c = new Chess();
+    const moves = chess.history({ verbose: true });
+    for (let i = 0; i <= currentReviewIndex && i < moves.length; i++) {
+      c.move(moves[i]);
+    }
+    return c;
+  }, [chess, currentReviewIndex, history.length]);
 
   const isCurrentBoardLive = currentReviewIndex === history.length - 1;
 
@@ -491,7 +512,7 @@ export const GamePage: React.FC<GamePageProps> = ({
         {/* Left Column: Board, Clocks, Eval Bar */}
         <div className="lg:col-span-8 flex flex-col items-center gap-3">
           {/* Top Clock (Opponent) */}
-          <div className="w-full max-w-[min(86vw,min(70vh,560px))]">
+          <div className="w-full max-w-[min(100%,min(74vh,600px))]">
             <ChessClock
               color={boardOrientation === 'w' ? 'b' : 'w'}
               timeRemainingSeconds={boardOrientation === 'w' ? blackTime : whiteTime}
@@ -501,8 +522,8 @@ export const GamePage: React.FC<GamePageProps> = ({
             />
           </div>
 
-          {/* Board + Vertical Evaluation Bar */}
-          <div className="flex items-center justify-center gap-3 w-full">
+          {/* Board + Vertical Evaluation Bar - strictly square, never stretched */}
+          <div className="flex items-center justify-center gap-2 sm:gap-3 w-full max-w-[min(100%,min(74vh,600px))] mx-auto">
             <EvaluationBar
               evaluation={evaluation}
               orientation={boardOrientation}
@@ -510,22 +531,24 @@ export const GamePage: React.FC<GamePageProps> = ({
               isThinking={isAiThinking}
             />
 
-            <ChessBoard
-              chess={boardDisplayChess}
-              orientation={boardOrientation}
-              theme={settings.boardTheme}
-              pieceStyle={settings.pieceStyle}
-              showCoordinates={settings.showCoordinates}
-              highlightLegalMoves={settings.highlightLegalMoves}
-              lastMove={lastMove}
-              hintMove={hintMove}
-              isInteractive={isCurrentBoardLive && !isGameOver && !isAiThinking}
-              onMakeMove={handleMakeMove}
-            />
+            <div className="flex-1 min-w-0 flex items-center justify-center">
+              <ChessBoard
+                chess={boardDisplayChess}
+                orientation={boardOrientation}
+                theme={settings.boardTheme}
+                pieceStyle={settings.pieceStyle}
+                showCoordinates={settings.showCoordinates}
+                highlightLegalMoves={settings.highlightLegalMoves}
+                lastMove={lastMove}
+                hintMove={hintMove}
+                isInteractive={isCurrentBoardLive && !isGameOver && !isAiThinking}
+                onMakeMove={handleMakeMove}
+              />
+            </div>
           </div>
 
           {/* Bottom Clock (You) */}
-          <div className="w-full max-w-[min(86vw,min(70vh,560px))]">
+          <div className="w-full max-w-[min(100%,min(74vh,600px))]">
             <ChessClock
               color={boardOrientation === 'w' ? 'w' : 'b'}
               timeRemainingSeconds={boardOrientation === 'w' ? whiteTime : blackTime}
@@ -537,7 +560,7 @@ export const GamePage: React.FC<GamePageProps> = ({
 
           {/* Hint Toast Banner */}
           {hintMessage && (
-            <div className="w-full max-w-[min(86vw,min(70vh,560px))] p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs flex items-start gap-2.5 animate-in fade-in">
+            <div className="w-full max-w-[min(100%,min(74vh,600px))] p-3 rounded-xl bg-amber-950/40 border border-amber-500/40 text-amber-200 text-xs flex items-start gap-2.5 animate-in fade-in">
               <Lightbulb className="w-4 h-4 text-amber-400 flex-shrink-0 mt-0.5" />
               <div className="flex-1 leading-relaxed">
                 {hintMessage}
